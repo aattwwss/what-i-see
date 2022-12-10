@@ -8,4 +8,4 @@ RUN go build -o main .
 FROM scratch
 COPY --from=build /app/main /app/main
 LABEL "tag"="what-i-see:latest"
-CMD ["/app/main"]
+ENTRYPOINT  ["/app/main"]
