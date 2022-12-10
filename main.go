@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 )
 
 type Header struct {
@@ -11,9 +12,15 @@ type Header struct {
 	Values []string `json:"values,omitempty"`
 }
 
+type Headers []Header
+
+func (h Headers) Len() int           { return len(h) }
+func (h Headers) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h Headers) Less(i, j int) bool { return h[i].Key < h[j].Key }
+
 type Result struct {
 	Method  string      `json:"method,omitempty"`
-	Headers []Header    `json:"header,omitempty"`
+	Headers Headers     `json:"header,omitempty"`
 	Body    interface{} `json:"body,omitempty"`
 }
 
@@ -21,7 +28,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	res := Result{
 		Method:  r.Method,
-		Headers: []Header{},
+		Headers: Headers{},
 	}
 
 	for key, values := range r.Header {
@@ -32,8 +39,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		for _, value := range values {
 			header.Values = append(header.Values, value)
 		}
+		sort.Strings(header.Values)
 		res.Headers = append(res.Headers, header)
 	}
+
+	sort.Sort(res.Headers)
 
 	var requestBody interface{}
 	err := json.NewDecoder(r.Body).Decode(&requestBody)
