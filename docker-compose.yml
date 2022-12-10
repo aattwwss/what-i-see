@@ -2,6 +2,7 @@ version: "3"
 services:
   what-i-see:
     build: .
+    restart: unless-stopped
 networks:
   default:
     name: nginx-proxy-manager
