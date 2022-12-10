@@ -1,0 +1,8 @@
+version: "3"
+services:
+  what-i-see:
+    build: .
+networks:
+  default:
+    name: nginx-proxy-manager
+    external: true
