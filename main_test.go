@@ -10,20 +10,14 @@ import (
 	"testing"
 )
 
-func findHeader(headers Headers, key string) ([]string, bool) {
-	for _, h := range headers {
-		if h.Key == key {
-			return h.Values, true
-		}
-	}
-	return nil, false
-}
-
-func TestHandler_GETWithQueryAndSortedHeaders(t *testing.T) {
+func TestHandler_GETWithCloudflareAndHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://debug.example.com/webhook/test?tag=b&tag=a&env=prod", nil)
-	req.Header.Add("X-Zebra", "z")
-	req.Header.Add("X-Alpha", "2")
-	req.Header.Add("X-Alpha", "1")
+	req.Header.Set("Cf-Connecting-Ip", "2401:7400:c805:5628::1c7a")
+	req.Header.Set("Cf-Ipcountry", "SG")
+	req.Header.Set("Cf-Ray", "a4bf61b14cd5237c-SIN")
+	req.Header.Add("X-Single", "only-one")
+	req.Header.Add("X-Multi", "2")
+	req.Header.Add("X-Multi", "1")
 
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -49,6 +43,16 @@ func TestHandler_GETWithQueryAndSortedHeaders(t *testing.T) {
 	if res.Path != "/webhook/test" {
 		t.Errorf("Path = %q, want /webhook/test", res.Path)
 	}
+	if res.ClientIP != "2401:7400:c805:5628::1c7a" {
+		t.Errorf("ClientIP = %q, want 2401:7400:c805:5628::1c7a", res.ClientIP)
+	}
+	if res.Country != "SG" {
+		t.Errorf("Country = %q, want SG", res.Country)
+	}
+	if res.CfRay != "a4bf61b14cd5237c-SIN" {
+		t.Errorf("CfRay = %q, want a4bf61b14cd5237c-SIN", res.CfRay)
+	}
+
 	wantQuery := map[string][]string{
 		"env": {"prod"},
 		"tag": {"b", "a"},
@@ -60,11 +64,28 @@ func TestHandler_GETWithQueryAndSortedHeaders(t *testing.T) {
 		t.Errorf("Body = %v, want nil", res.Body)
 	}
 
-	if len(res.Headers) != 2 || res.Headers[0].Key != "X-Alpha" || res.Headers[1].Key != "X-Zebra" {
-		t.Errorf("Headers not sorted by key: %+v", res.Headers)
+	if got := res.Headers["X-Single"]; got != "only-one" {
+		t.Errorf("X-Single = %#v, want %q", got, "only-one")
 	}
-	if want := []string{"1", "2"}; !reflect.DeepEqual(res.Headers[0].Values, want) {
-		t.Errorf("X-Alpha values = %v, want %v", res.Headers[0].Values, want)
+	wantMulti := []any{"1", "2"}
+	if got := res.Headers["X-Multi"]; !reflect.DeepEqual(got, wantMulti) {
+		t.Errorf("X-Multi = %#v, want %#v", got, wantMulti)
+	}
+}
+
+func TestHandler_ClientIPFallbackToXFF(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://debug.example.com/", nil)
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	var res Result
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if res.ClientIP != "203.0.113.9" {
+		t.Errorf("ClientIP = %q, want 203.0.113.9", res.ClientIP)
 	}
 }
 
@@ -83,7 +104,7 @@ func TestHandler_JSONBody(t *testing.T) {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 
-	wantBody := map[string]interface{}{"hello": "world", "n": float64(42)}
+	wantBody := map[string]any{"hello": "world", "n": float64(42)}
 	if !reflect.DeepEqual(res.Body, wantBody) {
 		t.Errorf("Body = %#v, want %#v", res.Body, wantBody)
 	}
@@ -137,15 +158,15 @@ func TestHandler_RedactsCredentials(t *testing.T) {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 
-	wantCookies := []string{"authelia_session=[redacted]", "cf_clearance=[redacted]"}
-	if got, ok := findHeader(res.Headers, "Cookie"); !ok || !reflect.DeepEqual(got, wantCookies) {
-		t.Errorf("Cookie header = %v, want %v", got, wantCookies)
+	wantCookies := []any{"authelia_session=[redacted]", "cf_clearance=[redacted]"}
+	if got := res.Headers["Cookie"]; !reflect.DeepEqual(got, wantCookies) {
+		t.Errorf("Cookie header = %#v, want %#v", got, wantCookies)
 	}
-	if got, ok := findHeader(res.Headers, "Authorization"); !ok || !reflect.DeepEqual(got, []string{"[redacted]"}) {
-		t.Errorf("Authorization header = %v, want [redacted]", got)
+	if got := res.Headers["Authorization"]; got != "[redacted]" {
+		t.Errorf("Authorization header = %#v, want [redacted]", got)
 	}
-	if got, ok := findHeader(res.Headers, "Proxy-Authorization"); !ok || !reflect.DeepEqual(got, []string{"[redacted]"}) {
-		t.Errorf("Proxy-Authorization header = %v, want [redacted]", got)
+	if got := res.Headers["Proxy-Authorization"]; got != "[redacted]" {
+		t.Errorf("Proxy-Authorization header = %#v, want [redacted]", got)
 	}
 }
 

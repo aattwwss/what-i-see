@@ -8,22 +8,12 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
+	"strings"
 	"time"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB
-
-type Header struct {
-	Key    string   `json:"key,omitempty"`
-	Values []string `json:"values,omitempty"`
-}
-
-type Headers []Header
-
-func (h Headers) Len() int           { return len(h) }
-func (h Headers) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h Headers) Less(i, j int) bool { return h[i].Key < h[j].Key }
 
 type Result struct {
 	Method     string              `json:"method,omitempty"`
@@ -31,9 +21,12 @@ type Result struct {
 	Host       string              `json:"host,omitempty"`
 	Path       string              `json:"path,omitempty"`
 	Query      map[string][]string `json:"query,omitempty"`
+	ClientIP   string              `json:"client_ip,omitempty"`
+	Country    string              `json:"country,omitempty"`
+	CfRay      string              `json:"cf_ray,omitempty"`
 	RemoteAddr string              `json:"remote_addr,omitempty"`
-	Headers    Headers             `json:"header,omitempty"`
-	Body       interface{}         `json:"body,omitempty"`
+	Headers    map[string]any      `json:"headers,omitempty"`
+	Body       any                 `json:"body,omitempty"`
 }
 
 // statusRecorder captures the status code for request logging.
@@ -47,7 +40,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -64,15 +57,38 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	}
 }
 
+func collapseValues(vals []string) any {
+	slices.Sort(vals)
+	if len(vals) == 1 {
+		return vals[0]
+	}
+	return vals
+}
+
+func clientIP(r *http.Request) string {
+	if ip := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); ip != "" {
+		return ip
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		first, _, _ := strings.Cut(xff, ",")
+		if ip := strings.TrimSpace(first); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	cip := clientIP(r)
 	defer func() {
 		slog.Info("request",
 			"method", r.Method,
 			"host", r.Host,
 			"path", r.URL.Path,
-			"client_ip", r.Header.Get("Cf-Connecting-Ip"),
+			"client_ip", cip,
+			"cf_ray", r.Header.Get("Cf-Ray"),
 			"remote", r.RemoteAddr,
 			"status", rec.status,
 			"duration_ms", time.Since(start).Milliseconds(),
@@ -93,7 +109,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var requestBody interface{}
+	var requestBody any
 	if len(rawBody) > 0 {
 		if err := json.Unmarshal(rawBody, &requestBody); err != nil {
 			requestBody = string(rawBody)
@@ -105,40 +121,38 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		query = q
 	}
 
+	headers := make(map[string]any, len(r.Header))
+	for key, values := range r.Header {
+		switch key {
+		case "Cookie":
+			var redacted []string
+			for _, c := range r.Cookies() {
+				redacted = append(redacted, c.Name+"=[redacted]")
+			}
+			if len(redacted) == 0 {
+				redacted = []string{"[redacted]"}
+			}
+			headers[key] = collapseValues(redacted)
+		case "Authorization", "Proxy-Authorization":
+			headers[key] = "[redacted]"
+		default:
+			headers[key] = collapseValues(slices.Clone(values))
+		}
+	}
+
 	res := Result{
 		Method:     r.Method,
 		Proto:      r.Proto,
 		Host:       r.Host,
 		Path:       r.URL.Path,
 		Query:      query,
+		ClientIP:   cip,
+		Country:    r.Header.Get("Cf-Ipcountry"),
+		CfRay:      r.Header.Get("Cf-Ray"),
 		RemoteAddr: r.RemoteAddr,
-		Headers:    Headers{},
+		Headers:    headers,
 		Body:       requestBody,
 	}
-
-	for key, values := range r.Header {
-		header := Header{
-			Key: key,
-		}
-		switch key {
-		case "Cookie":
-			for _, c := range r.Cookies() {
-				header.Values = append(header.Values, c.Name+"=[redacted]")
-			}
-			if len(header.Values) == 0 {
-				header.Values = []string{"[redacted]"}
-			}
-			sort.Strings(header.Values)
-		case "Authorization", "Proxy-Authorization":
-			header.Values = []string{"[redacted]"}
-		default:
-			header.Values = append(header.Values, values...)
-			sort.Strings(header.Values)
-		}
-		res.Headers = append(res.Headers, header)
-	}
-
-	sort.Sort(res.Headers)
 
 	writeJSON(rec, http.StatusOK, res)
 }
