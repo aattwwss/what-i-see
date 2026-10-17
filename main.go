@@ -64,6 +64,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		slog.Info("request",
 			"method", r.Method,
 			"path", r.URL.Path,
+			"client_ip", r.Header.Get("Cf-Connecting-Ip"),
 			"remote", r.RemoteAddr,
 			"status", rec.status,
 			"duration_ms", time.Since(start).Milliseconds(),
@@ -91,6 +92,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	res := Result{
 		Method:  r.Method,
 		Headers: Headers{},
+		Body:    requestBody,
 	}
 
 	for key, values := range r.Header {
