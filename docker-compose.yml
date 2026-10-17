@@ -1,9 +1,10 @@
 version: "3"
 services:
   what-i-see:
+    container_name: what-i-see
     build: .
     restart: unless-stopped
 networks:
   default:
-    name: nginx-proxy-manager
+    name: proxy
     external: true
