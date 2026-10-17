@@ -1,15 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -27,9 +26,14 @@ func (h Headers) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h Headers) Less(i, j int) bool { return h[i].Key < h[j].Key }
 
 type Result struct {
-	Method  string      `json:"method,omitempty"`
-	Headers Headers     `json:"header,omitempty"`
-	Body    interface{} `json:"body,omitempty"`
+	Method     string              `json:"method,omitempty"`
+	Proto      string              `json:"proto,omitempty"`
+	Host       string              `json:"host,omitempty"`
+	Path       string              `json:"path,omitempty"`
+	Query      map[string][]string `json:"query,omitempty"`
+	RemoteAddr string              `json:"remote_addr,omitempty"`
+	Headers    Headers             `json:"header,omitempty"`
+	Body       interface{}         `json:"body,omitempty"`
 }
 
 // statusRecorder captures the status code for request logging.
@@ -44,15 +48,18 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	j, err := json.Marshal(v)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		slog.Error("marshal response failed", "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if _, err := w.Write(j); err != nil {
+	if _, err := w.Write(buf.Bytes()); err != nil {
 		slog.Error("write response failed", "err", err)
 	}
 }
@@ -63,6 +70,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		slog.Info("request",
 			"method", r.Method,
+			"host", r.Host,
 			"path", r.URL.Path,
 			"client_ip", r.Header.Get("Cf-Connecting-Ip"),
 			"remote", r.RemoteAddr,
@@ -72,27 +80,40 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	r.Body = http.MaxBytesReader(rec, r.Body, maxBodyBytes)
-
-	var requestBody interface{}
-	err := json.NewDecoder(r.Body).Decode(&requestBody)
+	rawBody, err := io.ReadAll(r.Body)
 	var maxErr *http.MaxBytesError
 	switch {
-	case errors.Is(err, io.EOF):
-		requestBody = nil // empty body
 	case errors.As(err, &maxErr):
 		writeJSON(rec, http.StatusRequestEntityTooLarge,
 			map[string]string{"error": "request body too large"})
 		return
 	case err != nil:
 		writeJSON(rec, http.StatusBadRequest,
-			map[string]string{"error": "request body is not valid JSON"})
+			map[string]string{"error": "failed to read request body"})
 		return
 	}
 
+	var requestBody interface{}
+	if len(rawBody) > 0 {
+		if err := json.Unmarshal(rawBody, &requestBody); err != nil {
+			requestBody = string(rawBody)
+		}
+	}
+
+	var query map[string][]string
+	if q := r.URL.Query(); len(q) > 0 {
+		query = q
+	}
+
 	res := Result{
-		Method:  r.Method,
-		Headers: Headers{},
-		Body:    requestBody,
+		Method:     r.Method,
+		Proto:      r.Proto,
+		Host:       r.Host,
+		Path:       r.URL.Path,
+		Query:      query,
+		RemoteAddr: r.RemoteAddr,
+		Headers:    Headers{},
+		Body:       requestBody,
 	}
 
 	for key, values := range r.Header {
@@ -101,13 +122,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		switch key {
 		case "Cookie":
-			// Redact credentials: count cookies, never echo their values.
-			n := 0
-			for _, v := range values {
-				n += strings.Count(v, ";") + 1
+			for _, c := range r.Cookies() {
+				header.Values = append(header.Values, c.Name+"=[redacted]")
 			}
-			header.Values = []string{fmt.Sprintf("[redacted %d cookie(s)]", n)}
-		case "Authorization":
+			if len(header.Values) == 0 {
+				header.Values = []string{"[redacted]"}
+			}
+			sort.Strings(header.Values)
+		case "Authorization", "Proxy-Authorization":
 			header.Values = []string{"[redacted]"}
 		default:
 			header.Values = append(header.Values, values...)
