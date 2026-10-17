@@ -12,9 +12,12 @@ import (
 
 func TestHandler_GETWithCloudflareAndHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://debug.example.com/webhook/test?tag=b&tag=a&env=prod", nil)
+	req.RemoteAddr = "172.30.0.15:60370"
 	req.Header.Set("Cf-Connecting-Ip", "2401:7400:c805:5628::1c7a")
 	req.Header.Set("Cf-Ipcountry", "SG")
-	req.Header.Set("Cf-Ray", "a4bf61b14cd5237c-SIN")
+	req.Header.Set("Cf-Ray", "a4bf61b14cd5237c-HKG")
+	req.Header.Set("X-Forwarded-For", "172.71.210.192")
+	req.Header.Set("Via", "2.0 Caddy")
 	req.Header.Add("X-Single", "only-one")
 	req.Header.Add("X-Multi", "2")
 	req.Header.Add("X-Multi", "1")
@@ -49,8 +52,12 @@ func TestHandler_GETWithCloudflareAndHeaders(t *testing.T) {
 	if res.Country != "SG" {
 		t.Errorf("Country = %q, want SG", res.Country)
 	}
-	if res.CfRay != "a4bf61b14cd5237c-SIN" {
-		t.Errorf("CfRay = %q, want a4bf61b14cd5237c-SIN", res.CfRay)
+	if res.CfRay != "a4bf61b14cd5237c-HKG" {
+		t.Errorf("CfRay = %q, want a4bf61b14cd5237c-HKG", res.CfRay)
+	}
+	wantRoute := "2401:7400:c805:5628::1c7a (SG, IPv6) -> Cloudflare HKG (172.71.210.192) -> 2.0 Caddy (172.30.0.15:60370)"
+	if res.Route != wantRoute {
+		t.Errorf("Route = %q, want %q", res.Route, wantRoute)
 	}
 
 	wantQuery := map[string][]string{

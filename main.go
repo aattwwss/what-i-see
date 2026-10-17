@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ type Result struct {
 	Host       string              `json:"host,omitempty"`
 	Path       string              `json:"path,omitempty"`
 	Query      map[string][]string `json:"query,omitempty"`
+	Route      string              `json:"route,omitempty"`
 	ClientIP   string              `json:"client_ip,omitempty"`
 	Country    string              `json:"country,omitempty"`
 	CfRay      string              `json:"cf_ray,omitempty"`
@@ -65,17 +67,55 @@ func collapseValues(vals []string) any {
 	return vals
 }
 
+func firstXFF(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		first, _, _ := strings.Cut(xff, ",")
+		return strings.TrimSpace(first)
+	}
+	return ""
+}
+
 func clientIP(r *http.Request) string {
 	if ip := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); ip != "" {
 		return ip
 	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		if ip := strings.TrimSpace(first); ip != "" {
-			return ip
+	return firstXFF(r)
+}
+
+func buildRoute(r *http.Request, cip string) string {
+	var hops []string
+
+	if cip != "" {
+		family := "IPv4"
+		if strings.Contains(cip, ":") {
+			family = "IPv6"
+		}
+		if country := r.Header.Get("Cf-Ipcountry"); country != "" {
+			hops = append(hops, fmt.Sprintf("%s (%s, %s)", cip, country, family))
+		} else {
+			hops = append(hops, fmt.Sprintf("%s (%s)", cip, family))
 		}
 	}
-	return ""
+
+	if cfRay := r.Header.Get("Cf-Ray"); cfRay != "" {
+		colo := cfRay
+		if _, after, ok := strings.Cut(cfRay, "-"); ok && after != "" {
+			colo = after
+		}
+		if xff := firstXFF(r); xff != "" && xff != cip {
+			hops = append(hops, fmt.Sprintf("Cloudflare %s (%s)", colo, xff))
+		} else {
+			hops = append(hops, fmt.Sprintf("Cloudflare %s", colo))
+		}
+	}
+
+	if via := r.Header.Get("Via"); via != "" {
+		hops = append(hops, fmt.Sprintf("%s (%s)", via, r.RemoteAddr))
+	} else if len(hops) > 0 && r.RemoteAddr != "" {
+		hops = append(hops, r.RemoteAddr)
+	}
+
+	return strings.Join(hops, " -> ")
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +186,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		Host:       r.Host,
 		Path:       r.URL.Path,
 		Query:      query,
+		Route:      buildRoute(r, cip),
 		ClientIP:   cip,
 		Country:    r.Header.Get("Cf-Ipcountry"),
 		CfRay:      r.Header.Get("Cf-Ray"),
